@@ -1,5 +1,8 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { apiFetch } from "../utils/api";
+import { GeneratedAd } from "../utils/mockGenerator";
+import { CalendarEvent } from "../components/GoniflowCalendar";
 
 export interface Project {
   id: string;
@@ -28,6 +31,41 @@ interface ProjectState {
   savedAds: SavedAd[];
   isLoading: boolean;
   error: string | null;
+  
+  // Global editor states
+  editorPrompt: string;
+  setEditorPrompt: (val: string) => void;
+  editorImagePrompt: string;
+  setEditorImagePrompt: (val: string) => void;
+  editorPlatform: string;
+  setEditorPlatform: (val: string) => void;
+  editorTone: string;
+  setEditorTone: (val: string) => void;
+  editorUploadedImage: string | null;
+  setEditorUploadedImage: (val: string | null) => void;
+  editorUploadedImageName: string | null;
+  setEditorUploadedImageName: (val: string | null) => void;
+  editorGeneratedAd: GeneratedAd | null;
+  setEditorGeneratedAd: (ad: GeneratedAd | null) => void;
+  scheduleTargetDate: string | null;
+  setScheduleTargetDate: (date: string | null) => void;
+  editingCalendarEvent: CalendarEvent | null;
+  setEditingCalendarEvent: (event: CalendarEvent | null) => void;
+
+  // Global notifications
+  notification: { type: "success" | "error"; message: string } | null;
+  setNotification: (val: { type: "success" | "error"; message: string } | null) => void;
+  showNotification: (type: "success" | "error", message: string) => void;
+
+  // Calendar State & CRUD
+  calendarEvents: CalendarEvent[];
+  pendingCalendarEvent: Omit<CalendarEvent, "id" | "start"> | null;
+  setPendingCalendarEvent: (val: Omit<CalendarEvent, "id" | "start"> | null) => void;
+  loadCalendarEvents: () => void;
+  addCalendarEvent: (ev: Omit<CalendarEvent, "id">) => void;
+  updateCalendarEvent: (id: string, changes: Partial<CalendarEvent>) => void;
+  deleteCalendarEvent: (id: string) => void;
+
   fetchProjects: () => Promise<void>;
   createProject: (project: Omit<Project, "id">) => Promise<void>;
   updateProject: (id: string, project: Omit<Project, "id">) => Promise<void>;
@@ -38,12 +76,77 @@ interface ProjectState {
   deleteSavedAd: (projectId: string, adId: string) => Promise<void>;
 }
 
-export const useProjectStore = create<ProjectState>((set, get) => ({
-  projects: [],
-  activeProject: null,
-  savedAds: [],
-  isLoading: false,
-  error: null,
+export const useProjectStore = create<ProjectState>()(
+  persist(
+    (set, get) => ({
+      projects: [],
+      activeProject: null,
+      savedAds: [],
+      isLoading: false,
+      error: null,
+
+      // Initial editor states
+      editorPrompt: "",
+      setEditorPrompt: (val) => set({ editorPrompt: val }),
+      editorImagePrompt: "",
+      setEditorImagePrompt: (val) => set({ editorImagePrompt: val }),
+      editorPlatform: "facebook",
+      setEditorPlatform: (val) => set({ editorPlatform: val }),
+      editorTone: "professional",
+      setEditorTone: (val) => set({ editorTone: val }),
+      editorUploadedImage: null,
+      setEditorUploadedImage: (val) => set({ editorUploadedImage: val }),
+      editorUploadedImageName: null,
+      setEditorUploadedImageName: (val) => set({ editorUploadedImageName: val }),
+      editorGeneratedAd: null,
+      setEditorGeneratedAd: (ad) => set({ editorGeneratedAd: ad }),
+      scheduleTargetDate: null,
+      setScheduleTargetDate: (date) => set({ scheduleTargetDate: date }),
+      editingCalendarEvent: null,
+      setEditingCalendarEvent: (event) => set({ editingCalendarEvent: event }),
+
+      notification: null,
+      setNotification: (val) => set({ notification: val }),
+      showNotification: (type, message) => set({ notification: { type, message } }),
+
+      // Calendar values & CRUD
+      calendarEvents: [],
+      pendingCalendarEvent: null,
+      setPendingCalendarEvent: (val) => set({ pendingCalendarEvent: val }),
+      loadCalendarEvents: () => {
+        if (typeof window !== "undefined") {
+          try {
+            const stored = localStorage.getItem("goniflow_calendar_events");
+            if (stored) {
+              set({ calendarEvents: JSON.parse(stored) });
+            }
+          } catch {}
+        }
+      },
+      addCalendarEvent: (ev) => {
+        const newEv: CalendarEvent = { ...ev, id: `cal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+        const updated = [...get().calendarEvents, newEv];
+        set({ calendarEvents: updated });
+        if (typeof window !== "undefined") {
+          localStorage.setItem("goniflow_calendar_events", JSON.stringify(updated));
+        }
+        get().showNotification("success", "პოსტი განრიგში დაემატა!");
+      },
+      updateCalendarEvent: (id, changes) => {
+        const updated = get().calendarEvents.map(ev => ev.id === id ? { ...ev, ...changes } : ev);
+        set({ calendarEvents: updated });
+        if (typeof window !== "undefined") {
+          localStorage.setItem("goniflow_calendar_events", JSON.stringify(updated));
+        }
+      },
+      deleteCalendarEvent: (id) => {
+        const updated = get().calendarEvents.filter(ev => ev.id !== id);
+        set({ calendarEvents: updated });
+        if (typeof window !== "undefined") {
+          localStorage.setItem("goniflow_calendar_events", JSON.stringify(updated));
+        }
+        get().showNotification("success", "ჩანაწერი წაიშალა!");
+      },
 
 
   fetchProjects: async () => {
@@ -56,8 +159,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         const localProjects = localStorage.getItem("dev-projects");
         const projectsList = localProjects ? JSON.parse(localProjects) : [];
         set({ projects: projectsList, isLoading: false });
-        if (projectsList.length > 0 && !get().activeProject) {
-          get().setActiveProject(projectsList[0]);
+        if (projectsList.length > 0) {
+          if (!get().activeProject) {
+            get().setActiveProject(projectsList[0]);
+          } else {
+            get().fetchSavedAds(get().activeProject!.id);
+          }
         }
         return;
       }
@@ -66,8 +173,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       set({ projects: res.data || [], isLoading: false });
       
       // Auto select first project
-      if (res.data && res.data.length > 0 && !get().activeProject) {
-        get().setActiveProject(res.data[0]);
+      if (res.data && res.data.length > 0) {
+        if (!get().activeProject) {
+          get().setActiveProject(res.data[0]);
+        } else {
+          get().fetchSavedAds(get().activeProject!.id);
+        }
       }
     } catch (err: any) {
       // Graceful fallback if tables do not exist in DB
@@ -75,8 +186,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const localProjects = typeof window !== "undefined" ? localStorage.getItem("dev-projects") : null;
       const projectsList = localProjects ? JSON.parse(localProjects) : [];
       set({ projects: projectsList, isLoading: false });
-      if (projectsList.length > 0 && !get().activeProject) {
-        get().setActiveProject(projectsList[0]);
+      if (projectsList.length > 0) {
+        if (!get().activeProject) {
+          get().setActiveProject(projectsList[0]);
+        } else {
+          get().fetchSavedAds(get().activeProject!.id);
+        }
       }
     }
   },
@@ -309,4 +424,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       set({ savedAds: updated, isLoading: false });
     }
   }
-}));
+  }),
+  {
+    name: "goniflow-project-storage",
+    partialize: (state) => ({
+      activeProject: state.activeProject,
+    }),
+  }
+)
+);
