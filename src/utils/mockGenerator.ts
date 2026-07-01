@@ -1,146 +1,285 @@
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface GeneratorInput {
+  textPrompt: string;       // Post text instruction (optional → auto)
+  imagePrompt: string;      // Image generation/edit instruction (optional → stock/upload)
+  uploadedImage?: string;   // Base64 uploaded image (optional)
+  platform: string;
+  tone: string;
+  projectName?: string;
+  projectDescription?: string;
+  projectLink?: string;
+}
+
 export interface GeneratedAd {
   text: string;
   hashtags: string[];
   cta: string;
   imageUrl?: string;
   headline?: string;
+  /** How the image was determined */
+  imageMode?: "uploaded" | "generated-from-prompt" | "edited-from-upload" | "stock";
+  /** How the text was determined */
+  textMode?: "from-text-prompt" | "from-image-context" | "auto";
 }
 
-export function generateMockAd(prompt: string, platform: string, tone: string, uploadedImage?: string): GeneratedAd {
-  const cleanPrompt = prompt.trim() || (uploadedImage ? "ატვირთული სურათიდან გაანალიზებული პროდუქტი" : "ჩვენი ახალი ინოვაციური პროდუქტი");
-  
-  // Generic fallback visual image related to prompt keywords
-  let imageUrl = uploadedImage || "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80"; // business/tech default
-  if (!uploadedImage) {
-    if (cleanPrompt.toLowerCase().includes("ყავა") || cleanPrompt.toLowerCase().includes("კაფე")) {
-      imageUrl = "https://images.unsplash.com/photo-1509042239860-f550ce710b93?w=800&auto=format&fit=crop&q=80";
-    } else if (cleanPrompt.toLowerCase().includes("ტანსაცმელი") || cleanPrompt.toLowerCase().includes("მოდა")) {
-      imageUrl = "https://images.unsplash.com/photo-1483985988355-763728e1935b?w=800&auto=format&fit=crop&q=80";
-    } else if (cleanPrompt.toLowerCase().includes("სპორტი") || cleanPrompt.toLowerCase().includes("ვარჯიში")) {
-      imageUrl = "https://images.unsplash.com/photo-1517838277536-f5f99be501cd?w=800&auto=format&fit=crop&q=80";
-    } else if (cleanPrompt.toLowerCase().includes("საჭმელი") || cleanPrompt.toLowerCase().includes("რესტორანი")) {
-      imageUrl = "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop&q=80";
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+/** Pick a contextually matching stock image from Unsplash based on prompt keywords */
+function pickStockImage(prompt: string): string {
+  const p = prompt.toLowerCase();
+  const rules: [string[], string][] = [
+    [["ყავა", "coffee", "კაფე", "cafe", "espresso", "latte", "cappuccino"],
+      "https://images.unsplash.com/photo-1509042239860-f550ce710b93?w=800&auto=format&fit=crop&q=80"],
+    [["ტანსაცმელი", "მოდა", "fashion", "style", "clothes", "wear", "dress", "outfit"],
+      "https://images.unsplash.com/photo-1483985988355-763728e1935b?w=800&auto=format&fit=crop&q=80"],
+    [["სპორტი", "ვარჯიში", "gym", "fitness", "sport", "workout", "running", "yoga"],
+      "https://images.unsplash.com/photo-1517838277536-f5f99be501cd?w=800&auto=format&fit=crop&q=80"],
+    [["საჭმელი", "food", "რესტორანი", "restaurant", "meal", "dish", "pizza", "burger", "სუში"],
+      "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=800&auto=format&fit=crop&q=80"],
+    [["ტექნოლოგია", "tech", "software", "app", "digital", "computer", "phone", "ai", "startup"],
+      "https://images.unsplash.com/photo-1518770660439-4636190af475?w=800&auto=format&fit=crop&q=80"],
+    [["სილამაზე", "beauty", "cosmetic", "makeup", "skincare", "perfume", "cream", "spa"],
+      "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?w=800&auto=format&fit=crop&q=80"],
+    [["ბუნება", "nature", "travel", "მოგზაურობა", "outdoor", "forest", "mountain", "sea", "ocean"],
+      "https://images.unsplash.com/photo-1472214103451-9374bd1c798e?w=800&auto=format&fit=crop&q=80"],
+    [["სახლი", "home", "interior", "furniture", "decor", "house", "apartment", "room"],
+      "https://images.unsplash.com/photo-1555041469-a586c61ea9bc?w=800&auto=format&fit=crop&q=80"],
+    [["ჯანმრთელობა", "health", "medical", "wellness", "doctor", "clinic", "pharmacy"],
+      "https://images.unsplash.com/photo-1505751172876-fa1923c5c528?w=800&auto=format&fit=crop&q=80"],
+    [["ბიზნესი", "business", "office", "team", "meeting", "corporate", "work", "professional"],
+      "https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&auto=format&fit=crop&q=80"],
+    [["სასტუმრო", "hotel", "resort", "vacation", "trip", "journey", "tourism"],
+      "https://images.unsplash.com/photo-1542314831-068cd1dbfeeb?w=800&auto=format&fit=crop&q=80"],
+    [["მუსიკა", "music", "concert", "party", "event", "festival", "show"],
+      "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800&auto=format&fit=crop&q=80"],
+    [["განათლება", "education", "learning", "study", "school", "university", "course"],
+      "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=800&auto=format&fit=crop&q=80"],
+    [["ფინანსი", "finance", "money", "bank", "investment", "crypto", "trading"],
+      "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80"],
+    [["ავტომობილი", "car", "auto", "vehicle", "drive", "transport", "მანქანა"],
+      "https://images.unsplash.com/photo-1492144534655-ae79c964c9d7?w=800&auto=format&fit=crop&q=80"],
+    [["ფოტო", "photo", "camera", "photography", "portrait", "studio", "shoot"],
+      "https://images.unsplash.com/photo-1493863641943-9b68992a8d07?w=800&auto=format&fit=crop&q=80"],
+    [["ბავშვი", "child", "kids", "family", "toy", "baby", "parenting"],
+      "https://images.unsplash.com/photo-1516627145497-ae6968895b74?w=800&auto=format&fit=crop&q=80"],
+    [["ქუჩა", "city", "urban", "street", "building", "architecture", "modern"],
+      "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?w=800&auto=format&fit=crop&q=80"],
+  ];
+
+  for (const [kws, url] of rules) {
+    if (kws.some(k => p.includes(k))) return url;
+  }
+  // Default business/tech
+  return "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80";
+}
+
+// ─── Main generator ──────────────────────────────────────────────────────────
+
+export function generateMockAd(input: GeneratorInput): GeneratedAd {
+  const {
+    textPrompt,
+    imagePrompt,
+    uploadedImage,
+    platform,
+    tone,
+    projectName = "",
+    projectDescription = "",
+  } = input;
+
+  const hasText     = textPrompt.trim()   !== "";
+  const hasImgPrmt  = imagePrompt.trim()  !== "";
+  const hasUpload   = !!uploadedImage;
+
+  // ══════════════════════════════════════════════════════
+  // IMAGE LOGIC
+  // ══════════════════════════════════════════════════════
+  //  hasUpload + hasImgPrmt  → NEW image generated from (upload + prompt)
+  //  hasUpload + !hasImgPrmt → use uploaded image as-is (analyze for text)
+  //  !hasUpload + hasImgPrmt → generate image from prompt
+  //  !hasUpload + !hasImgPrmt → stock image from text/project context
+
+  let imageUrl: string;
+  let imageMode: GeneratedAd["imageMode"];
+
+  if (hasUpload && hasImgPrmt) {
+    // Edit: combine uploaded image with image prompt → generate new mock image
+    imageUrl = pickStockImage(imagePrompt);
+    imageMode = "edited-from-upload";
+  } else if (hasUpload) {
+    imageUrl = uploadedImage!;
+    imageMode = "uploaded";
+  } else if (hasImgPrmt) {
+    imageUrl = pickStockImage(imagePrompt);
+    imageMode = "generated-from-prompt";
+  } else {
+    imageUrl = pickStockImage(textPrompt || projectDescription || projectName);
+    imageMode = "stock";
+  }
+
+  // ══════════════════════════════════════════════════════
+  // TEXT LOGIC
+  // ══════════════════════════════════════════════════════
+  //  hasText              → use text prompt as-is
+  //  hasUpload + !hasImgPrmt → analyze uploaded image (text from image context)
+  //  hasImgPrmt           → derive text from image prompt context
+  //  none                 → full auto (use project context)
+
+  let effectivePrompt: string;
+  let textMode: GeneratedAd["textMode"];
+
+  if (hasText) {
+    effectivePrompt = textPrompt.trim();
+    textMode = "from-text-prompt";
+  } else if (hasUpload && !hasImgPrmt) {
+    effectivePrompt = projectName || "ატვირთული პროდუქტი";
+    textMode = "from-image-context";
+  } else if (hasImgPrmt) {
+    effectivePrompt = imagePrompt.trim();
+    textMode = "from-image-context";
+  } else {
+    effectivePrompt = projectName || projectDescription || "ჩვენი სერვისი";
+    textMode = "auto";
+  }
+
+  // Sanitise effectivePrompt
+  effectivePrompt = effectivePrompt.replace(/^\[[^\]]+\]\s*/g, "").trim();
+  if (!effectivePrompt) effectivePrompt = projectName || "ჩვენი პროდუქტი";
+
+  // ══════════════════════════════════════════════════════
+  // HEADLINE
+  // ══════════════════════════════════════════════════════
+  let headline = "";
+  if (textMode === "from-image-context" && hasUpload && !hasImgPrmt) {
+    headline = `📸 ფოტო-ანალიზი: ${projectName || effectivePrompt}`;
+  } else if (imageMode === "edited-from-upload") {
+    headline = `✨ სურათი გადამუშავდა: ${effectivePrompt || projectName}`;
+  } else if (imageMode === "generated-from-prompt") {
+    headline = `🎨 სურათი დაგენერირდა: ${effectivePrompt}`;
+  } else {
+    switch (tone) {
+      case "professional": headline = `პროფესიონალური გადაწყვეტილება: ${effectivePrompt}`; break;
+      case "funny":        headline = `😎 აი ის, რასაც ამდენ ხანს მალავდნენ! ${effectivePrompt}`; break;
+      case "bold":         headline = `💥 დროა შეცვალო თამაშის წესები: ${effectivePrompt}!`; break;
+      case "friendly":     headline = `👋 მოგესალმებით მეგობრებო! გაიცანით ${effectivePrompt}`; break;
+      default:             headline = `აღმოაჩინე ${effectivePrompt}`;
     }
   }
 
-
-  // Define headline templates based on tone
-  let headline = "";
-  switch (tone) {
-    case "professional":
-      headline = `პროფესიონალური გადაწყვეტილება: ${cleanPrompt}`;
-      break;
-    case "funny":
-      headline = `😎 აი ის, რასაც ამდენ ხანს მალავდნენ! ${cleanPrompt}`;
-      break;
-    case "bold":
-      headline = `💥 დროა შეცვალო თამაშის წესები: ${cleanPrompt}!`;
-      break;
-    case "friendly":
-      headline = `👋 მოგესალმებით მეგობრებო! გაიცანით ${cleanPrompt}`;
-      break;
-    default:
-      headline = `აღმოაჩინე ${cleanPrompt}`;
-  }
-
-  // Create content structures based on platform & tone
+  // ══════════════════════════════════════════════════════
+  // TEXT CONTENT BY PLATFORM × TONE
+  // ══════════════════════════════════════════════════════
   let text = "";
   let cta = "გაიგე მეტი";
   let hashtags: string[] = [];
 
+  // Build optional context prefix based on mode
+  const buildPrefix = (): string => {
+    if (textMode === "from-image-context" && hasUpload && !hasImgPrmt)
+      return `🎯 სურათის ანალიზის შედეგი:\n\nატვირთული ფოტოს საფუძველზე შექმნილია პოსტი!\n\n`;
+    if (textMode === "from-image-context" && hasImgPrmt)
+      return `🎨 სურათის კონტექსტიდან:\n\n`;
+    if (textMode === "auto")
+      return `✨ ავტო-გენერაცია:\n\n`;
+    return "";
+  };
+
+  // ── FACEBOOK ──────────────────────────────────────────
   if (platform === "facebook") {
     hashtags = ["#ინოვაცია", "#წარმატება", "#GoniFlow", "#კონტენტი"];
     cta = "დააჭირე აქ და გაიგე მეტი";
+    const px = buildPrefix();
 
     switch (tone) {
       case "professional":
-        text = `ეფექტურობა და ხარისხი ერთ სივრცეში! 🎯\n\nთუ ეძებთ სანდო და გრძელვადიან გადაწყვეტილებას თქვენი ბიზნესისთვის, გაეცანით: "${cleanPrompt}".\n\nჩვენ გთავაზობთ თანამედროვე სტანდარტებზე მორგებულ სერვისს, რომელიც დაგეხმარებათ დასახული მიზნების სწრაფად მიღწევაში.`;
+        text = `${px}ეფექტურობა და ხარისხი ერთ სივრცეში! 🎯\n\nთუ ეძებთ სანდო გადაწყვეტილებას, გაეცანით: "${effectivePrompt}".\n\nჩვენ გთავაზობთ თანამედროვე სტანდარტებზე მორგებულ სერვისს, რომელიც დაგეხმარებათ მიზნების მიღწევაში.`;
         break;
       case "funny":
-        text = `სერიოზულად, კიდევ ფიქრობთ? 🤔\n\n"${cleanPrompt}" – აი ეს არის ზუსტად ის, რაც თქვენს პროდუქტიულობას (ან უბრალოდ ხასიათს) ახალ საფეხურზე აყვანს! დაზოგეთ დრო და ნერვები ჩვენთან ერთად. 😄\n\nP.S. მარაგები იწურება (ჩვენი იუმორივით).`;
+        text = `${px}სერიოზულად, კიდევ ფიქრობთ? 🤔\n\n"${effectivePrompt}" – ზუსტად ის, რაც თქვენს პროდუქტიულობას (ან ხასიათს) ახალ საფეხურზე აყვანს! 😄\n\nP.S. მარაგები იწურება (ჩვენი იუმორივით).`;
         break;
       case "bold":
-        text = `⚡️ გაბედე მეტი! არ დაკმაყოფილდე საშუალო შედეგებით.\n\nმიიღე მაქსიმალური სარგებელი: "${cleanPrompt}" შექმნილია მათთვის, ვისაც სურს იყოს პირველი და არ ეშინია სიახლეების.\n\n🚀 გადადგი ნაბიჯი წარმატებისკენ დღესვე!`;
+        text = `${px}⚡️ გაბედე მეტი! არ დაკმაყოფილდე საშუალო შედეგებით.\n\n"${effectivePrompt}" შექმნილია მათთვის, ვისაც სურს იყოს პირველი.\n\n🚀 გადადგი ნაბიჯი წარმატებისკენ დღესვე!`;
         break;
       case "friendly":
-        text = `გამარჯობა მეგობრებო! 🌟\n\nგვინდა გაგიზიაროთ რაღაც განსაკუთრებული, რაც ძალიან დაგეხმარებათ ყოველდღიურობაში: "${cleanPrompt}". ჩვენ გულითა და დიდი მონდომებით ვიმუშავეთ ამაზე და დარწმუნებულები ვართ, რომ მოგეწონებათ.\n\nმოგვწერეთ ნებისმიერ დროს, სიამოვნებით გიპასუხებთ! ❤️`;
+        text = `${px}გამარჯობა მეგობრებო! 🌟\n\nგვინდა გაგიზიაროთ: "${effectivePrompt}". ჩვენ გულითა და მონდომებით ვიმუშავეთ ამაზე.\n\nმოგვწერეთ ნებისმიერ დროს! ❤️`;
         break;
       default:
-        text = `გაიცანით ახალი შესაძლებლობა: "${cleanPrompt}". საუკეთესო შეთავაზება სპეციალურად თქვენთვის. დაზოგეთ დრო და ენერგია ჩვენთან ერთად.`;
-    }
-  } 
-  
-  else if (platform === "instagram") {
-    hashtags = ["#instadaily", "#lifestyle", "#beauty", "#creative", "#loveit"];
-    cta = "იხილეთ ბმული პროფილში 🔗";
-
-    switch (tone) {
-      case "professional":
-        text = `სრულყოფილება დეტალებშია. ✨\n\nწარმოგიდგენთ "${cleanPrompt}"-ს. შექმნილია პროფესიონალების მიერ, თქვენი იდეალური შედეგისთვის. \n\n💼 გაზარდეთ პროდუქტიულობა და დაზოგეთ დრო.`;
-        break;
-      case "funny":
-        text = `როცა გგონია, რომ ყველაფერი გაქვს, მაგრამ უცებ აღმოაჩენ ამას... 🤷‍♂️💥\n\n"${cleanPrompt}" – თქვენი ყოველდღიური ცხოვრების ახალი გმირი. იდეალურია მათთვის, ვისაც უყვარს ცხოვრების გამარტივება (და ცოტა გართობაც). \n\n📸 მონიშნე მეგობარი, ვისაც ეს სჭირდება!`;
-        break;
-      case "bold":
-        text = `ეს მხოლოდ დასაწყისია! 🔥\n\n"${cleanPrompt}" ცვლის ყველაფერს, რაც აქამდე იცოდით. ნუ იქნები მაყურებელი, შექმენი საკუთარი ტრენდი. \n\n💥 იმოქმედე ახლა!`;
-        break;
-      case "friendly":
-        text = `თბილი და მყუდრო დღე ყველას! ☕️✨\n\nგვინდა გაჩვენოთ ჩვენი უახლესი ფავორიტი – "${cleanPrompt}". იდეალურია მეგობრული შეხვედრებისთვის ან უბრალოდ საკუთარი თავის გასანებივრებლად. \n\n💬 დაგვიტოვეთ კომენტარი, რას ფიქრობთ?`;
-        break;
-      default:
-        text = `ახალი ესთეტიკა და ფუნქციონალი. გაიცანით "${cleanPrompt}" და გახადეთ თქვენი დღე განსაკუთრებული. ✨`;
-    }
-  } 
-  
-  else if (platform === "linkedin") {
-    hashtags = ["#business", "#networking", "#innovation", "#leadership", "#b2b"];
-    cta = "წაიკითხეთ სრული სტატია";
-
-    switch (tone) {
-      case "professional":
-        text = `მოხარული ვართ წარმოგიდგინოთ ჩვენი უახლესი ინოვაციური პროექტი: "${cleanPrompt}".\n\nდღევანდელ სწრაფად მზარდ ბაზარზე, ეფექტური ინსტრუმენტების ქონა გადამწყვეტია. ეს გადაწყვეტილება ოპტიმიზაციას უკეთებს ბიზნეს პროცესებს და ზრდის გუნდის ეფექტურობას.\n\nმოხარული ვიქნებით, თუ გაგვიზიარებთ თქვენს გამოცდილებას კომენტარებში.`;
-        break;
-      case "funny":
-        text = `ვინ თქვა, რომ LinkedIn-ზე იუმორი აკრძალულია? 😉\n\nწარმოგიდგენთ "${cleanPrompt}"-ს. დიახ, ის მართლაც მუშაობს და არა, ის არ დაესწრება თქვენს ნაცვლად ორშაბათის შეხვედრებს (სამწუხაროდ). თუმცა, სხვა დანარჩენ საქმეს საოცრად მარტივად გაართმევს თავს!\n\nგახადეთ სამუშაო დღე უფრო მხიარული.`;
-        break;
-      case "bold":
-        text = `ლიდერობა ნიშნავს გარისკვას და წინსვლას! 🚀\n\nწარმოგიდგენთ პროდუქტს, რომელიც რევოლუციას მოახდენს თქვენს სფეროში: "${cleanPrompt}". თუ გსურთ იყოთ ინდუსტრიის სათავეში, ძველი მეთოდები აღარ არის საკმარისი.\n\nმიიღე სტრატეგიული გადაწყვეტილება დღესვე.`;
-        break;
-      case "friendly":
-        text = `მოგესალმებით, კოლეგებო და მეგობრებო! 👋\n\nჩვენი გუნდისთვის დიდი პატივია გაგიზიაროთ ახალი პროექტი – "${cleanPrompt}". ეს არის მრავალთვიანი მუშაობისა და პარტნიორების უკუკავშირის შედეგი. ჩვენ გვჯერა, რომ ის მნიშვნელოვან ღირებულებას მოუტანს თითოეულ თქვენგანს.\n\nგმადლობთ მხარდაჭერისთვის!`;
-        break;
-      default:
-        text = `წარმოგიდგენთ ახალ გადაწყვეტილებას ბიზნესის ზრდისთვის: "${cleanPrompt}". გაზარდეთ ეფექტურობა და მიაღწიეთ მეტს ჩვენთან ერთად.`;
-    }
-  } 
-  
-  else if (platform === "x") {
-    hashtags = ["#GoniFlow", "#Tech", "#Future"];
-    cta = "გადადი ბმულზე 🔗";
-
-    switch (tone) {
-      case "professional":
-        text = `წარმოგიდგენთ "${cleanPrompt}"-ს. ოპტიმიზებული, სწრაფი და სანდო გადაწყვეტილება პროფესიონალებისთვის. 🎯`;
-        break;
-      case "funny":
-        text = `თუ ფიქრობდით, რომ იდეალური პროდუქტი არ არსებობდა, გაეცანით: "${cleanPrompt}". სპოილერი: ის არსებობს! 😎`;
-        break;
-      case "bold":
-        text = `ძველი წესები აღარ მუშაობს. დროა გადახვიდე ახალ ეტაპზე: "${cleanPrompt}"! ⚡️🚀`;
-        break;
-      case "friendly":
-        text = `გამარჯობა ტვიტერის სამყაროვ! გაიცანით "${cleanPrompt}" – შექმნილია სიყვარულით თქვენთვის. ❤️`;
-        break;
-      default:
-        text = `აღმოაჩინე ახალი შესაძლებლობები: "${cleanPrompt}"-თან ერთად. 🌟`;
+        text = `${px}გაიცანით ახალი შესაძლებლობა: "${effectivePrompt}". საუკეთესო შეთავაზება სპეციალურად თქვენთვის.`;
     }
   }
 
-  return {
-    text,
-    hashtags,
-    cta,
-    imageUrl,
-    headline
-  };
+  // ── INSTAGRAM ─────────────────────────────────────────
+  else if (platform === "instagram") {
+    hashtags = ["#instadaily", "#lifestyle", "#creative", "#loveit", "#trending"];
+    cta = "იხილეთ ბმული პროფილში 🔗";
+    const px = textMode === "from-image-context" && hasUpload ? "🎯 ფოტო-ანალიზი:\n\n" :
+               textMode === "from-image-context" ? "🎨 " : "";
+
+    switch (tone) {
+      case "professional":
+        text = `${px}სრულყოფილება დეტალებშია. ✨\n\nწარმოგიდგენთ "${effectivePrompt}"-ს. პროფესიონალებისთვის, თქვენი შედეგისთვის.\n\n💼 გაზარდეთ პროდუქტიულობა.`;
+        break;
+      case "funny":
+        text = `${px}როცა გგონია, რომ ყველაფერი გაქვს, მაგრამ უცებ ამას აღმოაჩენ... 🤷‍♂️💥\n\n"${effectivePrompt}" – ყოველდღიური ცხოვრების ახალი გმირი.\n\n📸 მონიშნე მეგობარი, ვისაც ეს სჭირდება!`;
+        break;
+      case "bold":
+        text = `${px}ეს მხოლოდ დასაწყისია! 🔥\n\n"${effectivePrompt}" ცვლის ყველაფერს. ნუ იქნები მაყურებელი.\n\n💥 იმოქმედე ახლა!`;
+        break;
+      case "friendly":
+        text = `${px}თბილი და მყუდრო დღე ყველას! ☕️✨\n\nგვინდა გაჩვენოთ ჩვენი ფავორიტი – "${effectivePrompt}".\n\n💬 დაგვიტოვეთ კომენტარი!`;
+        break;
+      default:
+        text = `${px}ახალი ესთეტიკა და ფუნქციონალი. გაიცანით "${effectivePrompt}" ✨`;
+    }
+  }
+
+  // ── LINKEDIN ──────────────────────────────────────────
+  else if (platform === "linkedin") {
+    hashtags = ["#business", "#networking", "#innovation", "#leadership", "#b2b"];
+    cta = "წაიკითხეთ სრული სტატია";
+    const px = textMode === "from-image-context" && hasUpload ? "📸 ვიზუალური ანალიზი:\n\n" : "";
+
+    switch (tone) {
+      case "professional":
+        text = `${px}მოხარული ვართ წარმოგიდგინოთ: "${effectivePrompt}".\n\nდღევანდელ ბაზარზე ეფექტური ინსტრუმენტების ქონა გადამწყვეტია. ეს გადაწყვეტილება ოპტიმიზაციას უკეთებს ბიზნეს პროცესებს.\n\nმოხარული ვიქნებით კომენტარებში.`;
+        break;
+      case "funny":
+        text = `${px}ვინ თქვა, რომ LinkedIn-ზე იუმორი აკრძალულია? 😉\n\n"${effectivePrompt}" – ის მართლაც მუშაობს! შეხვედრებს ვერ ჩაანაცვლებს (სამწუხაროდ).`;
+        break;
+      case "bold":
+        text = `${px}ლიდერობა ნიშნავს გარისკვას! 🚀\n\n"${effectivePrompt}" რევოლუციას მოახდენს თქვენს სფეროში. მიიღე სტრატეგიული გადაწყვეტილება დღესვე.`;
+        break;
+      case "friendly":
+        text = `${px}მოგესალმებით, კოლეგებო! 👋\n\nდიდი სიხარულია გაგიზიაროთ: "${effectivePrompt}". ეს მრავალთვიანი მუშაობის შედეგია.\n\nგმადლობთ მხარდაჭერისთვის!`;
+        break;
+      default:
+        text = `${px}ახალი გადაწყვეტილება ბიზნესის ზრდისთვის: "${effectivePrompt}".`;
+    }
+  }
+
+  // ── X (Twitter) ───────────────────────────────────────
+  else if (platform === "x") {
+    hashtags = ["#GoniFlow", "#Tech", "#Future"];
+    cta = "გადადი ბმულზე 🔗";
+    const px = textMode === "from-image-context" && hasUpload ? "📸 " : "";
+
+    switch (tone) {
+      case "professional":
+        text = `${px}წარმოგიდგენთ "${effectivePrompt}"-ს. ოპტიმიზებული, სწრაფი და სანდო. 🎯`;
+        break;
+      case "funny":
+        text = `${px}იდეალური პროდუქტი არსებობს! გაიცანი: "${effectivePrompt}". სპოილერი: ის მართლა ასეა! 😎`;
+        break;
+      case "bold":
+        text = `${px}ძველი წესები აღარ მუშაობს. ახალი ეტაპი: "${effectivePrompt}"! ⚡️🚀`;
+        break;
+      case "friendly":
+        text = `${px}გამარჯობა ყველას! გაიცანი "${effectivePrompt}" – შექმნილია სიყვარულით. ❤️`;
+        break;
+      default:
+        text = `${px}ახალი შესაძლებლობები: "${effectivePrompt}"-თან ერთად. 🌟`;
+    }
+  }
+
+  return { text, hashtags, cta, imageUrl, headline, imageMode, textMode };
 }

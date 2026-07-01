@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "../../store/authStore";
 import { useProjectStore, Project } from "../../store/projectStore";
 import { generateMockAd, GeneratedAd } from "../../utils/mockGenerator";
 import SocialPreview from "../../components/SocialPreview";
+import GoniflowCalendar, { CalendarEvent } from "../../components/GoniflowCalendar";
 
 export default function WorkspacePage() {
     const { user, isLoading: isAuthLoading, isAuthenticated, logout } = useAuthStore();
@@ -26,7 +27,8 @@ export default function WorkspacePage() {
     const router = useRouter();
 
     // Generator Campaign Prompt State
-    const [prompt, setPrompt] = useState("");
+    const [prompt, setPrompt] = useState("");              // Text prompt
+    const [imagePrompt, setImagePrompt] = useState("");    // Image generation/edit prompt
     const [platform, setPlatform] = useState("facebook");
     const [tone, setTone] = useState("professional");
     const [isGenerating, setIsGenerating] = useState(false);
@@ -43,78 +45,102 @@ export default function WorkspacePage() {
     // Active Tab: generator | dashboard | calendar | saved-facebook | saved-instagram | saved-linkedin | saved-x
     const [activeTab, setActiveTab] = useState("generator");
 
-    // Sidebar platform expanded for history
-    const [expandedHistoryPlatform, setExpandedHistoryPlatform] = useState<string | null>(null);
-
-    // Toggle sidebar history for a platform
-    const toggleHistoryPlatform = (plat: string) => {
-        setExpandedHistoryPlatform(prev => prev === plat ? null : plat);
+    // Load a saved ad into the generator for editing
+    const handleLoadAdToGenerator = (ad: import("../../store/projectStore").SavedAd) => {
+        setPlatform(ad.platform);
+        setTone(ad.tone);
+        setPrompt(ad.headline || ad.text.split("\n")[0] || "");
+        setImagePrompt("");
+        setUploadedImage(ad.image_url && ad.image_url.startsWith("data:") ? ad.image_url : null);
+        setUploadedImageName(null);
+        setGeneratedAd({
+            headline: ad.headline || "",
+            text: ad.text,
+            cta: ad.cta || "",
+            imageUrl: ad.image_url || "",
+            hashtags: [],
+        });
+        setActiveTab("generator");
     };
 
-    // ── Schedule / Calendar State ──
-    type ScheduleEntry = { platform: string; tone: string };
-    type WeekSchedule = Record<string, ScheduleEntry[]>;
-
-    const DAYS_GEO: { id: string; label: string; short: string }[] = [
-        { id: "monday",    label: "ორშაბათი",    short: "ორშ" },
-        { id: "tuesday",   label: "სამშაბათი",   short: "სამ" },
-        { id: "wednesday", label: "ოთხშაბათი", short: "ოთხ" },
-        { id: "thursday",  label: "ხუთშაბათი",  short: "ხუთ" },
-        { id: "friday",    label: "პარასკევი",    short: "პარ" },
-        { id: "saturday",  label: "შაბათი",    short: "შაბ" },
-        { id: "sunday",    label: "კვირა",      short: "კვი" },
-    ];
-
-    const PLATFORMS_CFG = [
-        { id: "facebook",  label: "Facebook",   icon: "🔵", color: "bg-blue-500/10 text-blue-400 border-blue-500/20" },
-        { id: "instagram", label: "Instagram",  icon: "📸", color: "bg-pink-500/10 text-pink-400 border-pink-500/20" },
-        { id: "linkedin",  label: "LinkedIn",   icon: "💼", color: "bg-teal-500/10 text-teal-400 border-teal-500/20" },
-        { id: "x",         label: "X",          icon: "🐦", color: "bg-slate-700/20 text-slate-300 border-slate-700/40" },
-    ];
-
-    const TONES_CFG = [
-        { id: "professional", label: "ოფიციალური" },
-        { id: "friendly",     label: "მეგობრული" },
-        { id: "funny",        label: "ხუმარა" },
-        { id: "bold",         label: "მბზინავი" },
-    ];
-
-    const defaultSchedule: WeekSchedule = {
-        monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: []
+    // Custom Notification Modal
+    const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
+    const showNotification = (type: "success" | "error", message: string) => {
+        setNotification({ type, message });
     };
 
-    const [schedule, setSchedule] = useState<WeekSchedule>(defaultSchedule);
-    const [addingDay, setAddingDay] = useState<string | null>(null); // which day's "add" popover is open
-    const [newEntryPlatform, setNewEntryPlatform] = useState("facebook");
-    const [newEntryTone, setNewEntryTone] = useState("professional");
+    // ── Calendar Events State ──
+    const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([]);
+    const [pendingCalendarEvent, setPendingCalendarEvent] = useState<Omit<CalendarEvent, "id" | "start"> | null>(null);
+    const [scheduleTargetDate, setScheduleTargetDate] = useState<string | null>(null);
+    const [editingCalendarEvent, setEditingCalendarEvent] = useState<CalendarEvent | null>(null);
 
-    // Load schedule from localStorage on mount
+    // Load calendar events from localStorage on mount
     useEffect(() => {
         try {
-            const stored = localStorage.getItem("goniflow_schedule");
-            if (stored) setSchedule(JSON.parse(stored));
+            const stored = localStorage.getItem("goniflow_calendar_events");
+            if (stored) setCalendarEvents(JSON.parse(stored));
         } catch {}
     }, []);
 
-    // Save schedule to localStorage whenever it changes
+    // Persist calendar events to localStorage
     useEffect(() => {
-        localStorage.setItem("goniflow_schedule", JSON.stringify(schedule));
-    }, [schedule]);
+        localStorage.setItem("goniflow_calendar_events", JSON.stringify(calendarEvents));
+    }, [calendarEvents]);
 
-    const addScheduleEntry = (day: string) => {
-        const entry: ScheduleEntry = { platform: newEntryPlatform, tone: newEntryTone };
-        setSchedule(prev => ({ ...prev, [day]: [...(prev[day] || []), entry] }));
-        setAddingDay(null);
+    // CRUD handlers
+    const handleCalendarAddEvent = useCallback((ev: Omit<CalendarEvent, "id">) => {
+        const newEv: CalendarEvent = { ...ev, id: `cal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}` };
+        setCalendarEvents(prev => [...prev, newEv]);
+        showNotification("success", "პოსტი განრიგში დაემატა!");
+    }, []);
+
+    const handleCalendarUpdateEvent = useCallback((id: string, changes: Partial<CalendarEvent>) => {
+        setCalendarEvents(prev => prev.map(ev => ev.id === id ? { ...ev, ...changes } : ev));
+    }, []);
+
+    const handleCalendarDeleteEvent = useCallback((id: string) => {
+        setCalendarEvents(prev => prev.filter(ev => ev.id !== id));
+        showNotification("success", "ჩანაწერი წაიშალა!");
+    }, []);
+
+    const handleNavigateToGenerator = useCallback((isoDateTime: string) => {
+        setScheduleTargetDate(isoDateTime);
+        setActiveTab("generator");
+    }, []);
+
+    const handleNavigateToGeneratorForEdit = useCallback((event: CalendarEvent) => {
+        setEditingCalendarEvent(event);
+        setPlatform(event.platform);
+        setTone(event.tone);
+        setPrompt(event.headline || event.text || "");
+        setImagePrompt("");
+        setUploadedImage(null);
+        setUploadedImageName(null);
+        setActiveTab("generator");
+    }, []);
+
+    const handleUpdateCalendarEventFromEdit = () => {
+        if (!editingCalendarEvent) return;
+
+        handleCalendarUpdateEvent(editingCalendarEvent.id, {
+            platform,
+            tone,
+            headline: prompt.trim() || `${platform.toUpperCase()} ჩანაწერი`,
+            text: prompt.trim() || `${platform.toUpperCase()} ჩანაწერი`,
+        });
+
+        // Reset inputs and return to calendar
+        setEditingCalendarEvent(null);
+        setPrompt("");
+        setUploadedImage(null);
+        setUploadedImageName(null);
+        setGeneratedAd(null);
+        setActiveTab("calendar");
+        showNotification("success", "განრიგის ჩანაწერი წარმატებით განახლდა!");
     };
 
-    const removeScheduleEntry = (day: string, idx: number) => {
-        setSchedule(prev => ({
-            ...prev,
-            [day]: prev[day].filter((_, i) => i !== idx)
-        }));
-    };
-
-    const totalScheduledPerWeek = Object.values(schedule).reduce((sum, arr) => sum + arr.length, 0);
+    const totalScheduledPerWeek = calendarEvents.length;
 
     // Modal state for project creation/editing
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -134,12 +160,6 @@ export default function WorkspacePage() {
     // Settings Modal State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    // Custom Notification Modal
-    const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
-    const showNotification = (type: "success" | "error", message: string) => {
-        setNotification({ type, message });
-    };
-
     // Redirect to login if unauthenticated
     useEffect(() => {
         if (!isAuthLoading && !isAuthenticated) {
@@ -153,6 +173,14 @@ export default function WorkspacePage() {
             fetchProjects();
         }
     }, [isAuthenticated, fetchProjects]);
+
+    // Reset calendar slot mode when switching away from the generator tab
+    useEffect(() => {
+        if (activeTab !== "generator") {
+            setScheduleTargetDate(null);
+            setEditingCalendarEvent(null);
+        }
+    }, [activeTab]);
 
     const handleLogout = async () => {
         try {
@@ -271,31 +299,47 @@ export default function WorkspacePage() {
     };
 
     const handleGenerate = () => {
-        if ((!prompt.trim() && !uploadedImage) || !activeProject) return;
+        if (!activeProject) return;
         setIsGenerating(true);
         setGeneratedAd(null);
-        
-        // Mock Vision analysis context injection
-        let imageContext = "";
-        if (uploadedImageName) {
-            imageContext = ` [ატვირთული სურათი: ${uploadedImageName}]`;
-        }
-
-        // Context-aware prompt generation: Combine project info + prompt + image name if uploaded
-        const combinedContext = `[ბიზნესი: ${activeProject.name}. სფერო/აღწერა: ${activeProject.description}. საიტი: ${activeProject.link}]${imageContext} - კამპანია: ${prompt || "პროდუქტის ზოგადი რეკლამირება"}`;
 
         setTimeout(() => {
-            const result = generateMockAd(combinedContext, platform, tone, uploadedImage || undefined);
-            
-            // If prompt is empty but image name exists, simulate a vision analysis by tweaking headlines
-            if (!prompt.trim() && uploadedImageName) {
-                result.text = `🎯 სურათის ანალიზის შედეგი:\n\nატვირთული ფოტოს საფუძველზე შექმნილია პოსტი!\n\n${result.text}`;
-                result.headline = `📸 ფოტოდან გაანალიზებული: ${activeProject.name}`;
-            }
-
+            const result = generateMockAd({
+                textPrompt: prompt,
+                imagePrompt,
+                uploadedImage: uploadedImage || undefined,
+                platform,
+                tone,
+                projectName: activeProject.name,
+                projectDescription: activeProject.description,
+                projectLink: activeProject.link,
+            });
             setGeneratedAd(result);
             setIsGenerating(false);
-        }, 1500);
+        }, 1600);
+    };
+
+    const handleDirectAddToCalendar = () => {
+        if (!scheduleTargetDate) return;
+
+        handleCalendarAddEvent({
+            title: platform,
+            start: scheduleTargetDate,
+            platform,
+            tone,
+            headline: prompt.trim() || `${platform.toUpperCase()} ჩანაწერი`,
+            text: prompt.trim() || `${platform.toUpperCase()} ჩანაწერი`,
+            cta: "",
+            allDay: false,
+        });
+
+        // Reset inputs and return to calendar
+        setScheduleTargetDate(null);
+        setPrompt("");
+        setUploadedImage(null);
+        setUploadedImageName(null);
+        setGeneratedAd(null);
+        setActiveTab("calendar");
     };
 
     const handleSave = async () => {
@@ -364,12 +408,16 @@ export default function WorkspacePage() {
             <aside className="w-66 border-r border-slate-800 bg-slate-950/80 backdrop-blur-xl flex flex-col justify-between p-6 shrink-0">
                 <div className="space-y-6">
                     {/* Brand */}
-                    <div className="flex items-center gap-3">
-                        <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/25">
+                    <div 
+                        onClick={() => router.push("/")}
+                        className="flex items-center gap-3 cursor-pointer group hover:opacity-95 transition-all"
+                        title="მთავარ გვერდზე გადასვლა"
+                    >
+                        <div className="h-9 w-9 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/25 group-hover:scale-102 transition-all">
                             <span className="font-extrabold text-white text-base">G</span>
                         </div>
                         <div>
-                            <span className="font-black text-lg tracking-tight bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent">GoniFlow</span>
+                            <span className="font-black text-lg tracking-tight bg-gradient-to-r from-white via-slate-200 to-indigo-300 bg-clip-text text-transparent group-hover:text-indigo-200 transition-colors">GoniFlow</span>
                             <span className="text-[10px] text-indigo-400 font-bold block leading-none">POST WORKSPACE</span>
                         </div>
                     </div>
@@ -503,95 +551,38 @@ export default function WorkspacePage() {
                             </button>
                         </div>
 
-                        {/* Platform History Submenus */}
+                        {/* Platform Library Links */}
                         <div className="space-y-1">
                             <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 px-4 mb-2">შენახული პოსტები</span>
 
                             {([
-                                { id: "facebook", label: "Facebook", icon: "🔵", accent: "text-blue-400", accentBg: "bg-blue-500/10", accentBorder: "border-blue-500/20" },
-                                { id: "instagram", label: "Instagram", icon: "📸", accent: "text-pink-400", accentBg: "bg-pink-500/10", accentBorder: "border-pink-500/20" },
-                                { id: "linkedin", label: "LinkedIn", icon: "💼", accent: "text-teal-400", accentBg: "bg-teal-500/10", accentBorder: "border-teal-500/20" },
-                                { id: "x", label: "X (Twitter)", icon: "🐦", accent: "text-slate-200", accentBg: "bg-slate-700/20", accentBorder: "border-slate-700/40" },
+                                { id: "facebook",  label: "Facebook",   icon: "🔵", activeColor: "bg-blue-600/20 text-blue-300 border border-blue-500/30",  hoverColor: "hover:bg-blue-900/20 hover:text-blue-300",  badgeCls: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
+                                { id: "instagram", label: "Instagram",  icon: "📸", activeColor: "bg-pink-600/20 text-pink-300 border border-pink-500/30",  hoverColor: "hover:bg-pink-900/20 hover:text-pink-300",  badgeCls: "bg-pink-500/15 text-pink-400 border-pink-500/30" },
+                                { id: "linkedin",  label: "LinkedIn",   icon: "💼", activeColor: "bg-teal-600/20 text-teal-300 border border-teal-500/30",  hoverColor: "hover:bg-teal-900/20 hover:text-teal-300",  badgeCls: "bg-teal-500/15 text-teal-400 border-teal-500/30" },
+                                { id: "x",         label: "X (Twitter)",icon: "🐦", activeColor: "bg-slate-700/40 text-slate-200 border border-slate-600/40", hoverColor: "hover:bg-slate-800/40 hover:text-slate-200", badgeCls: "bg-slate-700/30 text-slate-300 border-slate-600/40" },
                             ] as const).map((p) => {
                                 const count = getSavedCountByPlatform(p.id);
-                                const isOpen = expandedHistoryPlatform === p.id;
-                                const platformAds = savedAds.filter(a => a.platform === p.id);
+                                const isActive = activeTab === `saved-${p.id}`;
                                 return (
-                                    <div key={p.id}>
-                                        {/* Platform toggle button */}
-                                        <button
-                                            onClick={() => toggleHistoryPlatform(p.id)}
-                                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${
-                                                isOpen
-                                                    ? `${p.accentBg} ${p.accent} border ${p.accentBorder}`
-                                                    : "text-slate-400 hover:bg-slate-900/50 hover:text-slate-200"
-                                            }`}
-                                        >
-                                            <span className="flex items-center gap-2">
-                                                <span>{p.icon}</span> {p.label}
+                                    <button
+                                        key={p.id}
+                                        onClick={() => setActiveTab(`saved-${p.id}`)}
+                                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${
+                                            isActive ? p.activeColor : `text-slate-400 ${p.hoverColor}`
+                                        }`}
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <span>{p.icon}</span>
+                                            {p.label}
+                                        </span>
+                                        {count > 0 ? (
+                                            <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-black border ${isActive ? p.badgeCls : "bg-slate-900 text-slate-500 border-slate-800"}`}>
+                                                {count}
                                             </span>
-                                            <span className="flex items-center gap-1.5">
-                                                {count > 0 && (
-                                                    <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-black border ${
-                                                        isOpen ? `${p.accentBg} ${p.accent} ${p.accentBorder}` : "bg-slate-950 text-slate-500 border-slate-900"
-                                                    }`}>
-                                                        {count}
-                                                    </span>
-                                                )}
-                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className={`w-3 h-3 transition-transform ${isOpen ? "rotate-180" : ""}`}>
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-                                                </svg>
-                                            </span>
-                                        </button>
-
-                                        {/* Inline history list */}
-                                        {isOpen && (
-                                            <div className="ml-3 mt-1 mb-1 space-y-1 border-l border-slate-800 pl-3">
-                                                {platformAds.length === 0 ? (
-                                                    <div className="py-3 px-2 text-center">
-                                                        <p className="text-[10px] text-slate-600 leading-relaxed">ჯერ არ გაქვთ შენახული {p.label}-ის პოსტები</p>
-                                                        <button
-                                                            onClick={() => { setPlatform(p.id); setActiveTab("generator"); }}
-                                                            className="mt-1.5 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
-                                                        >
-                                                            ➕ პოსტის შექმნა
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5 scrollbar-thin">
-                                                        {platformAds.slice().reverse().map((ad) => (
-                                                            <button
-                                                                key={ad.id}
-                                                                onClick={() => setActiveTab(`saved-${p.id}`)}
-                                                                className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-slate-900/70 transition-all group"
-                                                            >
-                                                                <p className="text-[11px] font-semibold text-slate-300 group-hover:text-white truncate leading-tight">
-                                                                    {ad.headline || ad.text.split("\n")[0]}
-                                                                </p>
-                                                                <p className="text-[9px] text-slate-600 mt-0.5 line-clamp-2 leading-relaxed group-hover:text-slate-500">
-                                                                    {ad.text}
-                                                                </p>
-                                                                {ad.cta && (
-                                                                    <span className={`inline-block mt-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md ${p.accentBg} ${p.accent} border ${p.accentBorder}`}>
-                                                                        {ad.cta}
-                                                                    </span>
-                                                                )}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                {/* View all link */}
-                                                {platformAds.length > 0 && (
-                                                    <button
-                                                        onClick={() => setActiveTab(`saved-${p.id}`)}
-                                                        className={`w-full text-center text-[10px] font-bold py-1.5 rounded-lg ${p.accent} hover:bg-slate-900/50 transition-colors`}
-                                                    >
-                                                        ყველა ({count}) →
-                                                    </button>
-                                                )}
-                                            </div>
+                                        ) : (
+                                            <span className="text-[9px] text-slate-700">—</span>
                                         )}
-                                    </div>
+                                    </button>
                                 );
                             })}
                         </div>
@@ -627,23 +618,81 @@ export default function WorkspacePage() {
             {/* Main Content Area */}
             <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
                 {/* Header */}
-                <header className="h-16 border-b border-slate-800 bg-slate-950/40 backdrop-blur-xl px-8 flex items-center justify-between shrink-0">
-                    <div className="flex items-center gap-2">
-                        <h1 className="text-xl font-bold tracking-tight text-white mr-4">
-                            {activeTab === "generator"  && "პოსტების გენერატორი"}
-                            {activeTab === "dashboard"  && "Dashboard"}
-                            {activeTab === "calendar"   && "განრიგი / კალენდარი"}
-                            {activeTab.startsWith("saved-") && `შენახული პოსტები: ${activeTab.replace("saved-", "").toUpperCase()}`}
-                        </h1>
+                <header className="h-20 border-b border-slate-800 bg-slate-950/40 backdrop-blur-xl px-8 flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-4 min-w-0">
+                        {/* Page Title / Section */}
+                        <div className="flex flex-col border-r border-slate-800 pr-5 shrink-0">
+                            <span className="text-[9px] uppercase tracking-wider font-bold text-slate-500">Workspace</span>
+                            <h1 className="text-sm font-extrabold text-white mt-0.5">
+                                {activeTab === "generator"  && "გენერატორი"}
+                                {activeTab === "dashboard"  && "პანელი"}
+                                {activeTab === "calendar"   && "კალენდარი"}
+                                {activeTab.startsWith("saved-") && "ბიბლიოთეკა"}
+                            </h1>
+                        </div>
+
                         {activeProject && (
-                            <span className="text-xs bg-slate-800/80 border border-slate-700 px-3 py-1 rounded-full text-slate-300 font-semibold">
-                                {activeProject.name}
-                            </span>
+                            <div className="flex items-center gap-3 min-w-0 pl-1">
+                                {/* Project Logo */}
+                                <img
+                                    src={activeProject.logo_url}
+                                    alt="Logo"
+                                    className="w-10 h-10 rounded-xl object-cover border border-slate-800 shadow-md shrink-0 bg-slate-900"
+                                    onError={(e) => {
+                                        (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1560179707-f14e90ef3623?w=100&auto=format&fit=crop&q=80";
+                                    }}
+                                />
+                                {/* Project Details Column */}
+                                <div className="flex flex-col min-w-0 leading-tight">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-extrabold text-xs text-white truncate max-w-[150px]">
+                                            {activeProject.name}
+                                        </span>
+                                        {activeProject.link && (
+                                            <a
+                                                href={activeProject.link.startsWith("http") ? activeProject.link : `https://${activeProject.link}`}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-slate-500 hover:text-indigo-400 transition-colors flex items-center"
+                                                title="საიტის გახსნა"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                                                </svg>
+                                            </a>
+                                        )}
+                                        <button
+                                            onClick={() => openEditModal(activeProject)}
+                                            className="px-2 py-0.5 ml-1 rounded-lg border border-slate-800 bg-slate-900/60 hover:bg-slate-900 hover:border-indigo-500/40 hover:text-indigo-400 text-[10px] font-bold text-slate-400 transition-all flex items-center gap-1 shrink-0"
+                                            title="საქმიანობის რედაქტირება"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-2.5 h-2.5">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.83 20.062a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+                                            </svg>
+                                            რედაქტირება
+                                        </button>
+                                    </div>
+                                    
+                                    {/* Subtitle / Context description with Custom Hover Tooltip */}
+                                    <div className="relative group shrink-0 min-w-0 max-w-[280px] mt-1">
+                                        <span className="text-[10px] text-slate-500 italic truncate block cursor-help">
+                                            კონტექსტი: {activeProject.description || "აღწერის გარეშე"}
+                                        </span>
+                                        {/* Hover Tooltip for full text */}
+                                        <div className="absolute left-0 top-full mt-2 hidden group-hover:block w-72 p-3 bg-slate-950 border border-slate-800 text-slate-300 rounded-xl shadow-2xl z-50 text-[11px] leading-relaxed normal-case font-normal animate-fade-in">
+                                            <p className="font-bold text-white mb-1">საქმიანობის სრული კონტექსტი</p>
+                                            <p className="italic text-slate-400 whitespace-pre-line">{activeProject.description || "აღწერის გარეშე"}</p>
+                                            <div className="absolute bottom-full left-6 w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-b-[6px] border-b-slate-950" />
+                                            <div className="absolute bottom-full left-6 w-0 h-0 border-l-[7px] border-l-transparent border-r-[7px] border-r-transparent border-b-[7px] border-b-slate-800 -z-10" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         )}
                     </div>
-                    <div className="flex items-center gap-2">
-                        <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        <span className="text-xs text-slate-400 font-medium">Supabase სესია აქტიურია</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Supabase</span>
                     </div>
                 </header>
 
@@ -673,106 +722,187 @@ export default function WorkspacePage() {
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start h-full">
-                                    {/* Left: Input Form */}
-                                    <div className="glass-panel rounded-2xl p-6 space-y-6">
-                                        {/* Business context visualization */}
-                                        <div className="p-4 bg-slate-950/40 border border-slate-800 rounded-xl space-y-2 text-xs flex items-center justify-between gap-4">
-                                            <div className="min-w-0 space-y-2">
-                                                <div className="flex items-center gap-2">
-                                                    <img 
-                                                        src={activeProject.logo_url} 
-                                                        alt="Project Logo" 
-                                                        className="w-5 h-5 rounded object-cover" 
-                                                        onError={(e) => {
-                                                            (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1560179707-f14e90ef3623?w=50&auto=format&fit=crop&q=80";
-                                                        }}
-                                                    />
-                                                    <span className="font-bold text-white truncate">{activeProject.name}</span>
-                                                    {activeProject.link && (
-                                                        <span className="text-slate-500 font-mono truncate max-w-[150px]">{activeProject.link}</span>
-                                                    )}
-                                                </div>
-                                                <p className="text-slate-400 italic line-clamp-2">კონტექსტი: {activeProject.description || "აღწერის გარეშე"}</p>
-                                            </div>
+                                        {/* Left: Input Form */}
+                                        <div className="glass-panel rounded-2xl p-6 space-y-6">
 
-                                            {/* Edit Button directly on active context bar */}
-                                            <button
-                                                onClick={() => openEditModal(activeProject)}
-                                                className="px-2.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-400 hover:text-white text-[11px] font-bold transition-all shrink-0 flex items-center gap-1"
-                                                title="პროფილის რედაქტირება"
-                                            >
-                                                ✏️ რედაქტირება
-                                            </button>
-                                        </div>
+                                        {/* ── Calendar target date banner ── */}
+                                        {scheduleTargetDate && (
+                                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/8 animate-pulse-once">
+                                                <span className="text-emerald-400">📅</span>
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-[11px] font-bold text-emerald-300">
+                                                        კალენდარში დამატება:
+                                                    </p>
+                                                    <p className="text-[10px] text-emerald-400/70">
+                                                        {new Date(scheduleTargetDate).toLocaleDateString("ka-GE", { day: "numeric", month: "long", year: "numeric" })}
+                                                        {" "}
+                                                        {new Date(scheduleTargetDate).toLocaleTimeString("ka-GE", { hour: "2-digit", minute: "2-digit" })}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => setScheduleTargetDate(null)}
+                                                    className="text-emerald-600 hover:text-emerald-400 transition-colors text-xs"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                        )}
+
+                                        {/* ── Calendar edit event banner ── */}
+                                        {editingCalendarEvent && (
+                                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-indigo-500/30 bg-indigo-500/8 animate-pulse-once">
+                                                <span className="text-indigo-400">✏️</span>
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-[11px] font-bold text-indigo-300">
+                                                        განრიგის ჩანაწერის რედაქტირება:
+                                                    </p>
+                                                    <p className="text-[10px] text-indigo-400/70">
+                                                        {new Date(editingCalendarEvent.start).toLocaleDateString("ka-GE", { day: "numeric", month: "long", year: "numeric" })}
+                                                        {" "}
+                                                        {new Date(editingCalendarEvent.start).toLocaleTimeString("ka-GE", { hour: "2-digit", minute: "2-digit" })}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditingCalendarEvent(null);
+                                                        setPrompt("");
+                                                    }}
+                                                    className="text-indigo-600 hover:text-indigo-400 transition-colors text-xs"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                        )}
 
                                         <div>
-                                            <h2 className="text-base font-bold text-white mb-1">პოსტის შექმნა</h2>
-                                            <p className="text-xs text-slate-400">აღწერეთ კამპანია ან ატვირთეთ პროდუქტის ფოტო ანალიზისთვის.</p>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <h2 className="text-base font-bold text-white">პოსტის შექმნა</h2>
+                                            </div>
+                                            {/* Smart Mode Indicator */}
+                                            <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+                                                {prompt.trim() ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-400 border border-indigo-500/30">📝 ტექსტი: პრომპტი</span>
+                                                ) : uploadedImage && !imagePrompt.trim() ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">🔍 ტექსტი: სურათის ანალიზი</span>
+                                                ) : imagePrompt.trim() ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/30">🔍 ტექსტი: სური.კონტ.</span>
+                                                ) : (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-slate-700/30 text-slate-500 border border-slate-700/40">✨ ტექსტი: ავტო</span>
+                                                )}
+                                                <span className="text-slate-800">·</span>
+                                                {uploadedImage && imagePrompt.trim() ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">✨ სური.: ატვ.+რედ.</span>
+                                                ) : uploadedImage ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">📸 სური.: ატვირთული</span>
+                                                ) : imagePrompt.trim() ? (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-400 border border-rose-500/30">🎨 სური.: გენ.პრომ.</span>
+                                                ) : (
+                                                    <span className="inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full bg-slate-700/30 text-slate-500 border border-slate-700/40">🖼️ სური.: სტოკი</span>
+                                                )}
+                                            </div>
                                         </div>
 
-                                        {/* Image Upload Area */}
-                                        <div className="space-y-2">
-                                            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">პროდუქტის ფოტო (AI ანალიზი)</label>
-                                            
+                                        {/* ── IMAGE SECTION ── */}
+                                        <div className="space-y-2.5">
+                                            <div className="flex items-center justify-between">
+                                                <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                                                    <span>🖼️</span> სურათი
+                                                </label>
+                                                <span className="text-[10px] text-slate-600 font-medium">სურვილისამებრ</span>
+                                            </div>
+
+                                            {/* Upload area */}
                                             {!uploadedImage ? (
-                                                <div 
+                                                <div
                                                     onClick={() => fileInputRef.current?.click()}
-                                                    className="border border-dashed border-slate-800 hover:border-indigo-500/40 rounded-xl p-6 text-center cursor-pointer bg-slate-950/20 hover:bg-indigo-500/[0.02] transition-all group"
+                                                    className="border border-dashed border-slate-800 hover:border-amber-500/40 rounded-xl p-4 text-center cursor-pointer bg-slate-950/20 hover:bg-amber-500/[0.02] transition-all group"
                                                 >
-                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8 text-slate-600 group-hover:text-indigo-400 mx-auto mb-2 transition-colors">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-7 h-7 text-slate-600 group-hover:text-amber-400 mx-auto mb-1.5 transition-colors">
                                                         <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
                                                     </svg>
-                                                    <span className="text-xs text-slate-400 group-hover:text-slate-300 font-semibold transition-colors block">დააჭირეთ სურათის ასატვირთად</span>
-                                                    <span className="text-[10px] text-slate-500 mt-1 block">AI ავტომატურად გაანალიზებს ფოტოს შინაარსს</span>
+                                                    <span className="text-xs text-slate-500 group-hover:text-slate-300 font-semibold transition-colors block">სურათის ატვირთვა</span>
+                                                    <span className="text-[10px] text-slate-700 mt-0.5 block">AI გაანალიზებს ფოტოს შინაარსს</span>
                                                 </div>
                                             ) : (
-                                                <div className="relative rounded-xl border border-slate-800 bg-slate-950/40 p-3 flex items-center justify-between gap-3">
+                                                <div className="relative rounded-xl border border-amber-800/30 bg-amber-950/10 p-3 flex items-center justify-between gap-3">
                                                     <div className="flex items-center gap-3 min-w-0">
-                                                        <img 
-                                                            src={uploadedImage} 
-                                                            alt="Uploaded Product" 
-                                                            className="w-12 h-12 rounded-lg object-cover border border-slate-800 shrink-0" 
+                                                        <img
+                                                            src={uploadedImage}
+                                                            alt="Uploaded"
+                                                            className="w-11 h-11 rounded-lg object-cover border border-amber-800/30 shrink-0"
                                                         />
                                                         <div className="min-w-0">
                                                             <p className="text-xs font-bold text-white truncate">{uploadedImageName}</p>
-                                                            <p className="text-[10px] text-emerald-400 font-bold flex items-center gap-1 mt-0.5">
-                                                                <span className="h-1 w-1 rounded-full bg-emerald-400"></span>
-                                                                მზად არის ანალიზისთვის
+                                                            <p className="text-[10px] text-amber-400 font-bold flex items-center gap-1 mt-0.5">
+                                                                <span className="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+                                                                {imagePrompt.trim() ? "ახალი სური. გენერირდება" : "ანალიზი + ტექსტი"}
                                                             </p>
                                                         </div>
                                                     </div>
                                                     <button
                                                         onClick={handleRemoveImage}
-                                                        className="h-8 w-8 rounded-lg border border-slate-850 hover:border-slate-800 bg-slate-900/60 hover:bg-slate-900 text-slate-400 hover:text-rose-400 text-xs font-bold transition-all shrink-0 flex items-center justify-center"
+                                                        className="h-7 w-7 rounded-lg border border-slate-800 hover:border-rose-800/50 bg-slate-900/60 hover:bg-rose-950/30 text-slate-500 hover:text-rose-400 text-xs transition-all shrink-0 flex items-center justify-center"
                                                         title="სურათის წაშლა"
                                                     >
                                                         ✕
                                                     </button>
                                                 </div>
                                             )}
-                                            
-                                            <input 
-                                                type="file" 
+
+                                            <input
+                                                type="file"
                                                 ref={fileInputRef}
                                                 onChange={handleImageChange}
                                                 accept="image/*"
-                                                className="hidden" 
+                                                className="hidden"
                                             />
+
+                                            {/* Separator */}
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex-1 h-px bg-slate-800/60" />
+                                                <span className="text-[9px] text-slate-600 font-bold whitespace-nowrap">
+                                                    {uploadedImage ? "ატვ. სური. + სური. პრომპტი" : "სურათის პრომპტი"}
+                                                </span>
+                                                <div className="flex-1 h-px bg-slate-800/60" />
+                                            </div>
+
+                                            {/* Image Prompt */}
+                                            <div className="space-y-1">
+                                                <textarea
+                                                    id="image-prompt"
+                                                    rows={2}
+                                                    value={imagePrompt}
+                                                    onChange={(e) => setImagePrompt(e.target.value)}
+                                                    placeholder={
+                                                        uploadedImage
+                                                            ? "ცარიელი = ატვ.სური.+ტექსტის ავტო ანალიზი\nპრომპტი = ატვ.სური.-ით ახალი სური. შეიქმნება"
+                                                            : "სურათის გენერაციის ინსტრუქცია... (ცარიელი = სტოკ სური.)"
+                                                    }
+                                                    className="w-full rounded-xl border border-slate-800 bg-slate-950/50 p-3 text-slate-100 placeholder-slate-600 outline-none transition-all focus:border-rose-500/40 focus:ring-2 focus:ring-rose-500/10 text-xs leading-relaxed"
+                                                />
+                                                {uploadedImage && imagePrompt.trim() && (
+                                                    <p className="text-[10px] text-purple-400 font-bold flex items-center gap-1">
+                                                        ✨ ატვ.სური. + პრომპტი → ახალი სურათი გენერირდება
+                                                    </p>
+                                                )}
+                                            </div>
                                         </div>
 
-                                        {/* Prompt Input */}
-                                        <div className="space-y-2">
-                                            <div className="flex justify-between items-center">
-                                                <label htmlFor="ad-prompt" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">კამპანიის იდეა / დამატებითი ტექსტი</label>
-                                                {uploadedImage && <span className="text-[10px] text-indigo-400 font-bold">არასავალდებულო (თუ სურათი ატვირთულია)</span>}
+                                        {/* ── TEXT PROMPT ── */}
+                                        <div className="space-y-1.5">
+                                            <div className="flex items-center justify-between">
+                                                <label htmlFor="text-prompt" className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                                                    <span>📝</span> ტექსტის პრომპტი
+                                                </label>
+                                                <span className="text-[10px] text-slate-600 font-medium">სურვილისამებრ</span>
                                             </div>
                                             <textarea
-                                                id="ad-prompt"
+                                                id="text-prompt"
                                                 rows={3}
                                                 value={prompt}
                                                 onChange={(e) => setPrompt(e.target.value)}
-                                                placeholder={uploadedImage ? "დატოვეთ ცარიელი AI-ით ფოტოს სრული ანალიზისთვის, ან დაამატეთ დამატებითი დეტალები..." : "მაგ: ორშაბათის აქცია, ყოველი მეორე ყავა უფასოდ ან საახალწლო 20%-იანი ფასდაკლება..."}
-                                                className="w-full rounded-xl border border-slate-800 bg-slate-950/50 p-4 text-slate-100 placeholder-slate-500 shadow-inner outline-none transition-all focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-500/10 text-sm leading-relaxed"
+                                                placeholder="პოსტის ტექსტის ინსტრუქცია... (ცარიელი = ავტო გენერირება)"
+                                                className="w-full rounded-xl border border-slate-800 bg-slate-950/50 p-3.5 text-slate-100 placeholder-slate-600 shadow-inner outline-none transition-all focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-500/10 text-sm leading-relaxed"
                                             />
                                         </div>
 
@@ -826,26 +956,96 @@ export default function WorkspacePage() {
                                             </div>
                                         </div>
 
-                                        {/* Generate Button */}
-                                        <button
-                                            onClick={handleGenerate}
-                                            disabled={isGenerating || (!prompt.trim() && !uploadedImage)}
-                                            className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm py-3.5 px-4 rounded-xl shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-2 transition-all active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none"
-                                        >
-                                            {isGenerating ? (
-                                                <>
-                                                    <svg className="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
-                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                                    </svg>
-                                                    AI აანალიზებს ფოტოს და კამპანიას...
-                                                </>
-                                            ) : (
-                                                <>
-                                                    🚀 პოსტის გენერირება
-                                                </>
-                                            )}
-                                        </button>
+                                        {/* Generate Button — dynamic label */}
+                                        {editingCalendarEvent ? (
+                                            <div className="flex gap-2 w-full">
+                                                <button
+                                                    onClick={handleUpdateCalendarEventFromEdit}
+                                                    className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm py-3.5 px-4 rounded-xl shadow-lg shadow-indigo-600/10 flex items-center justify-center gap-2 transition-all active:scale-[0.98] animate-pulse-once"
+                                                >
+                                                    ✏️ პოსტის რედაქტირება
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setEditingCalendarEvent(null);
+                                                        setPrompt("");
+                                                        setImagePrompt("");
+                                                        setUploadedImage(null);
+                                                        setUploadedImageName(null);
+                                                    }}
+                                                    className="px-4 py-3.5 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 text-slate-400 hover:text-rose-400 text-xs font-bold transition-all"
+                                                    title="გაუქმება"
+                                                >
+                                                    გაუქმება
+                                                </button>
+                                            </div>
+                                        ) : scheduleTargetDate ? (
+                                            <div className="flex gap-2 w-full">
+                                                <button
+                                                    onClick={handleDirectAddToCalendar}
+                                                    className="flex-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-sm py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-600/10 flex items-center justify-center gap-2 transition-all active:scale-[0.98] animate-pulse-once"
+                                                >
+                                                    📅 კალენდარში დამატება
+                                                </button>
+                                                <button
+                                                    onClick={() => {
+                                                        setScheduleTargetDate(null);
+                                                        setPrompt("");
+                                                        setImagePrompt("");
+                                                        setUploadedImage(null);
+                                                        setUploadedImageName(null);
+                                                    }}
+                                                    className="px-4 py-3.5 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 text-slate-400 hover:text-rose-400 text-xs font-bold transition-all"
+                                                    title="გაუქმება"
+                                                >
+                                                    გაუქმება
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                onClick={handleGenerate}
+                                                disabled={isGenerating || !activeProject}
+                                                className={`w-full text-white font-bold text-sm py-3.5 px-4 rounded-xl shadow-lg flex items-center justify-center gap-2 transition-all active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none ${
+                                                    uploadedImage && imagePrompt.trim()
+                                                        ? "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 shadow-purple-600/10"
+                                                        : uploadedImage
+                                                        ? "bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 shadow-amber-600/10"
+                                                        : imagePrompt.trim()
+                                                        ? "bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 shadow-rose-600/10"
+                                                        : "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 shadow-indigo-600/10"
+                                                }`}
+                                            >
+                                                {isGenerating ? (
+                                                    <>
+                                                        <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                                        </svg>
+                                                        {uploadedImage && imagePrompt.trim()
+                                                            ? "სურათი რედაქტირდება..."
+                                                            : uploadedImage
+                                                            ? "სურათი ანალიზდება..."
+                                                            : imagePrompt.trim()
+                                                            ? "სური. გენერირდება..."
+                                                            : "AI გენერირებს..."}
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        {uploadedImage && imagePrompt.trim()
+                                                            ? "✨ სურათის რედაქტირება + ტექსტი"
+                                                            : uploadedImage
+                                                            ? "🔍 სურათის ანალიზი + ტექსტი"
+                                                            : imagePrompt.trim() && prompt.trim()
+                                                            ? "🚀 ტექსტი + სურათი"
+                                                            : imagePrompt.trim()
+                                                            ? "🎨 სურათის გენერირება"
+                                                            : prompt.trim()
+                                                            ? "📝 ტექსტის გენერირება"
+                                                            : "🚀 ავტო გენერირება"}
+                                                    </>
+                                                )}
+                                            </button>
+                                        )}
                                     </div>
 
                                     {/* Right: Live Preview Panel */}
@@ -853,7 +1053,7 @@ export default function WorkspacePage() {
                                         <div className="flex items-center justify-between">
                                             <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">რეალური Live Preview</h2>
                                             {generatedAd && (
-                                                <div className="flex gap-2">
+                                                <div className="flex gap-2 flex-wrap">
                                                     <button
                                                         onClick={handleCopy}
                                                         className="px-3.5 py-1.5 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 font-semibold text-xs hover:bg-slate-800 transition-all flex items-center gap-1.5"
@@ -866,6 +1066,25 @@ export default function WorkspacePage() {
                                                     >
                                                         💾 შენახვა
                                                     </button>
+                                                    {/* If scheduleTargetDate is set, the main button was used, but we still allow manual scheduling just in case */}
+                                                    {!scheduleTargetDate && (
+                                                        <button
+                                                            onClick={() => {
+                                                                setPendingCalendarEvent({
+                                                                    title: platform,
+                                                                    platform,
+                                                                    tone,
+                                                                    headline: generatedAd.headline,
+                                                                    text: generatedAd.text,
+                                                                    cta: generatedAd.cta,
+                                                                });
+                                                                setActiveTab("calendar");
+                                                            }}
+                                                            className="px-3.5 py-1.5 rounded-lg border border-emerald-800/40 bg-emerald-950/40 text-emerald-300 font-semibold text-xs hover:bg-emerald-950/80 transition-all flex items-center gap-1.5"
+                                                        >
+                                                            📅 განრიგში დამატება
+                                                        </button>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -930,33 +1149,49 @@ export default function WorkspacePage() {
 
                             {/* Schedule summary */}
                             <div>
-                                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">კვირის განრიგი</h2>
-                                {totalScheduledPerWeek === 0 ? (
+                                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">მომავალი ჩანაწერები</h2>
+                                {calendarEvents.length === 0 ? (
                                     <div className="glass-panel rounded-2xl p-8 text-center text-slate-600 space-y-3">
                                         <p className="text-sm font-semibold">განრიგი ჯერ არ არის დაყენებული</p>
                                         <button onClick={() => setActiveTab("calendar")} className="text-xs font-bold text-emerald-400 hover:text-emerald-300 transition-colors">
-                                            ➕ განრიგის დაყენება
+                                            ➕ განრიგის გახსნა
                                         </button>
                                     </div>
                                 ) : (
-                                    <div className="grid grid-cols-7 gap-2">
-                                        {DAYS_GEO.map(day => (
-                                            <div key={day.id} className="glass-panel rounded-xl p-2 space-y-1.5">
-                                                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500 text-center">{day.short}</p>
-                                                {(schedule[day.id] || []).length === 0 ? (
-                                                    <p className="text-[9px] text-slate-700 text-center py-2">—</p>
-                                                ) : (
-                                                    (schedule[day.id] || []).map((entry, i) => {
-                                                        const pcfg = PLATFORMS_CFG.find(p => p.id === entry.platform);
-                                                        return (
-                                                            <div key={i} className={`text-[9px] font-bold px-1.5 py-1 rounded-lg border text-center ${pcfg?.color || ""}`}>
-                                                                {pcfg?.icon} {pcfg?.label}
-                                                            </div>
-                                                        );
-                                                    })
-                                                )}
-                                            </div>
-                                        ))}
+                                    <div className="space-y-2">
+                                        {[...calendarEvents]
+                                            .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
+                                            .slice(0, 5)
+                                            .map(ev => {
+                                                const PLAT_COLORS: Record<string, string> = {
+                                                    facebook: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+                                                    instagram: "bg-pink-500/10 text-pink-400 border-pink-500/20",
+                                                    linkedin: "bg-teal-500/10 text-teal-400 border-teal-500/20",
+                                                    x: "bg-slate-700/20 text-slate-300 border-slate-700/40",
+                                                };
+                                                const PLAT_ICONS: Record<string, string> = { facebook: "🔵", instagram: "📸", linkedin: "💼", x: "🐦" };
+                                                return (
+                                                    <div key={ev.id} className="flex items-center gap-3 px-4 py-3 rounded-xl border border-slate-800 bg-slate-950/40">
+                                                        <span className={`text-[10px] font-black px-2 py-1 rounded-lg border ${PLAT_COLORS[ev.platform] || ""}`}>
+                                                            {PLAT_ICONS[ev.platform]} {ev.platform.charAt(0).toUpperCase() + ev.platform.slice(1)}
+                                                        </span>
+                                                        <span className="text-xs text-white font-semibold flex-1 truncate">
+                                                            {ev.headline || ev.platform}
+                                                        </span>
+                                                        <span className="text-[10px] text-slate-500 shrink-0">
+                                                            {new Date(ev.start).toLocaleDateString("ka-GE", { day: "numeric", month: "short" })}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        {calendarEvents.length > 5 && (
+                                            <button
+                                                onClick={() => setActiveTab("calendar")}
+                                                className="w-full text-center text-xs font-bold text-indigo-400 hover:text-indigo-300 py-2 transition-colors"
+                                            >
+                                                ყველა {calendarEvents.length} ჩანაწერის ნახვა →
+                                            </button>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -974,11 +1209,18 @@ export default function WorkspacePage() {
                                 ) : (
                                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                                         {[...savedAds].reverse().slice(0, 6).map(ad => {
-                                            const pcfg = PLATFORMS_CFG.find(p => p.id === ad.platform);
+                                            const PLAT_COLORS: Record<string, string> = {
+                                                facebook: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+                                                instagram: "bg-pink-500/10 text-pink-400 border-pink-500/20",
+                                                linkedin: "bg-teal-500/10 text-teal-400 border-teal-500/20",
+                                                x: "bg-slate-700/20 text-slate-300 border-slate-700/40",
+                                            };
+                                            const PLAT_ICONS: Record<string, string> = { facebook: "🔵", instagram: "📸", linkedin: "💼", x: "🐦" };
+                                            const PLAT_LABELS: Record<string, string> = { facebook: "Facebook", instagram: "Instagram", linkedin: "LinkedIn", x: "X" };
                                             return (
                                                 <div key={ad.id} className="glass-panel rounded-2xl p-4 space-y-3">
-                                                    <div className={`inline-flex items-center gap-1.5 text-[10px] font-black px-2 py-0.5 rounded-full border ${pcfg?.color || ""}`}>
-                                                        {pcfg?.icon} {pcfg?.label}
+                                                    <div className={`inline-flex items-center gap-1.5 text-[10px] font-black px-2 py-0.5 rounded-full border ${PLAT_COLORS[ad.platform] || ""}`}>
+                                                        {PLAT_ICONS[ad.platform]} {PLAT_LABELS[ad.platform] || ad.platform}
                                                     </div>
                                                     <p className="text-xs font-bold text-white line-clamp-1">{ad.headline || "პოსტი"}</p>
                                                     <p className="text-[11px] text-slate-400 line-clamp-3 leading-relaxed">{ad.text}</p>
@@ -994,194 +1236,256 @@ export default function WorkspacePage() {
 
                     {/* 3. Calendar / Schedule Tab */}
                     {activeTab === "calendar" && (
-                        <div className="space-y-6 animate-fade-in">
-                            <div className="flex items-center justify-between">
-                                <p className="text-xs text-slate-400 leading-relaxed max-w-lg">
-                                    დაიგეგმეთ კვირის განრიგი — მიუთითეთ რომელ დღეს რომელ პლატფორმაზე გსურთ პოსტის გენერირება და რა ტონით.
-                                    განრიგი ინახება ლოკალურად.
-                                </p>
-                                {totalScheduledPerWeek > 0 && (
-                                    <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
-                                        {totalScheduledPerWeek} ჩანაწერი კვირაში
-                                    </span>
-                                )}
+                        <div className="space-y-4 animate-fade-in">
+                            {/* Header row */}
+                            <div className="flex items-center justify-between flex-wrap gap-3">
+                                <div>
+                                    <p className="text-xs text-slate-400 leading-relaxed">
+                                        Google Calendar-ის მსგავსი სრული განრიგი. დააჭირეთ ნებისმიერ დღეს ახალი ჩანაწერის დასამატებლად.
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {totalScheduledPerWeek > 0 && (
+                                        <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
+                                            {totalScheduledPerWeek} ჩანაწერი
+                                        </span>
+                                    )}
+                                    <button
+                                        onClick={() => { setPlatform("facebook"); setTone("professional"); setActiveTab("generator"); }}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10"
+                                    >
+                                        🚀 პოსტის შექმნა
+                                    </button>
+                                </div>
                             </div>
 
-                            {/* 7-day grid */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
-                                {DAYS_GEO.map(day => (
-                                    <div key={day.id} className="glass-panel rounded-2xl p-4 space-y-3 relative">
-                                        {/* Day header */}
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-xs font-black text-white">{day.label}</span>
-                                            <button
-                                                onClick={() => { setAddingDay(addingDay === day.id ? null : day.id); setNewEntryPlatform("facebook"); setNewEntryTone("professional"); }}
-                                                className="h-6 w-6 rounded-lg bg-slate-800 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 flex items-center justify-center transition-all text-sm font-bold"
-                                                title="პლატფორმის დამატება"
-                                            >
-                                                {addingDay === day.id ? "✕" : "+"}
-                                            </button>
-                                        </div>
-
-                                        {/* Entries */}
-                                        <div className="space-y-1.5 min-h-[40px]">
-                                            {(schedule[day.id] || []).length === 0 && addingDay !== day.id ? (
-                                                <p className="text-[10px] text-slate-700 italic text-center py-2">დასვენება ☕</p>
-                                            ) : (
-                                                (schedule[day.id] || []).map((entry, idx) => {
-                                                    const pcfg = PLATFORMS_CFG.find(p => p.id === entry.platform);
-                                                    const tcfg = TONES_CFG.find(t => t.id === entry.tone);
-                                                    return (
-                                                        <div key={idx} className={`flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-xl border ${pcfg?.color || ""} group`}>
-                                                            <span className="text-[10px] font-bold flex items-center gap-1 truncate">
-                                                                <span>{pcfg?.icon}</span>
-                                                                <span className="truncate">{pcfg?.label}</span>
-                                                            </span>
-                                                            <div className="flex items-center gap-1 shrink-0">
-                                                                <span className="text-[8px] font-bold opacity-60">{tcfg?.label}</span>
-                                                                <button
-                                                                    onClick={() => removeScheduleEntry(day.id, idx)}
-                                                                    className="opacity-0 group-hover:opacity-100 text-rose-400 hover:text-rose-300 transition-all text-[10px] font-black leading-none"
-                                                                    title="წაშლა"
-                                                                >
-                                                                    ✕
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })
-                                            )}
-                                        </div>
-
-                                        {/* Add entry popover */}
-                                        {addingDay === day.id && (
-                                            <div className="border-t border-slate-800 pt-3 space-y-2.5">
-                                                {/* Platform selector */}
-                                                <div className="space-y-1">
-                                                    <p className="text-[9px] font-bold uppercase tracking-wider text-slate-500">პლატფორმა</p>
-                                                    <div className="grid grid-cols-2 gap-1">
-                                                        {PLATFORMS_CFG.map(p => (
-                                                            <button
-                                                                key={p.id}
-                                                                onClick={() => setNewEntryPlatform(p.id)}
-                                                                className={`text-[9px] font-bold px-2 py-1.5 rounded-lg border transition-all flex items-center gap-1 ${
-                                                                    newEntryPlatform === p.id
-                                                                        ? p.color
-                                                                        : "border-slate-800 text-slate-500 hover:text-slate-300"
-                                                                }`}
-                                                            >
-                                                                {p.icon} {p.label}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                                {/* Tone selector */}
-                                                <div className="space-y-1">
-                                                    <p className="text-[9px] font-bold uppercase tracking-wider text-slate-500">ტონი</p>
-                                                    <div className="grid grid-cols-2 gap-1">
-                                                        {TONES_CFG.map(t => (
-                                                            <button
-                                                                key={t.id}
-                                                                onClick={() => setNewEntryTone(t.id)}
-                                                                className={`text-[9px] font-bold px-2 py-1.5 rounded-lg border transition-all ${
-                                                                    newEntryTone === t.id
-                                                                        ? "border-indigo-500 bg-indigo-500/10 text-indigo-300"
-                                                                        : "border-slate-800 text-slate-500 hover:text-slate-300"
-                                                                }`}
-                                                            >
-                                                                {t.label}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    onClick={() => addScheduleEntry(day.id)}
-                                                    className="w-full py-2 text-[10px] font-black bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl transition-all"
-                                                >
-                                                    ✓ დამატება
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
+                            {/* Platform legend */}
+                            <div className="flex items-center gap-3 flex-wrap">
+                                {[
+                                    { label: "Facebook",  color: "#3b82f6" },
+                                    { label: "Instagram", color: "#ec4899" },
+                                    { label: "LinkedIn",  color: "#14b8a6" },
+                                    { label: "X",         color: "#94a3b8" },
+                                ].map(p => (
+                                    <span key={p.label} className="flex items-center gap-1.5 text-[10px] font-semibold text-slate-400">
+                                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }} />
+                                        {p.label}
+                                    </span>
                                 ))}
                             </div>
+
+                            {/* Full Calendar */}
+                            <GoniflowCalendar
+                                events={calendarEvents}
+                                onAddEvent={handleCalendarAddEvent}
+                                onUpdateEvent={handleCalendarUpdateEvent}
+                                onDeleteEvent={handleCalendarDeleteEvent}
+                                onNavigateToGenerator={handleNavigateToGenerator}
+                                onNavigateToGeneratorForEdit={handleNavigateToGeneratorForEdit}
+                                pendingEvent={pendingCalendarEvent}
+                                onPendingEventConsumed={() => setPendingCalendarEvent(null)}
+                            />
                         </div>
                     )}
 
                     {/* 4. Platform specific Saved Ads Tabs */}
 
-                    {activeTab.startsWith("saved-") && (
-                        <div className="space-y-6">
-                            {!activeProject ? (
-                                <div className="glass-panel rounded-2xl p-12 text-center text-slate-500 max-w-md mx-auto">
-                                    <p className="text-sm font-semibold mb-2">საქმიანობის პროფილი არ არსებობს</p>
-                                    <button 
-                                        onClick={openCreateModal}
-                                        className="text-xs font-bold text-indigo-400 hover:underline"
-                                    >
-                                        შექმენით საქმიანობა და დაიწყეთ
-                                    </button>
+                    {activeTab.startsWith("saved-") && (() => {
+                        const currentPlatformId = activeTab.replace("saved-", "");
+                        const PLAT_META: Record<string, { label: string; icon: string; headerBg: string; badge: string; editBtn: string }> = {
+                            facebook:  { label: "Facebook",  icon: "🔵", headerBg: "bg-blue-500/8 border-blue-500/20",  badge: "bg-blue-500/15 text-blue-400 border-blue-500/30",  editBtn: "border-blue-700/40 bg-blue-950/30 text-blue-300 hover:bg-blue-900/40" },
+                            instagram: { label: "Instagram", icon: "📸", headerBg: "bg-pink-500/8 border-pink-500/20",  badge: "bg-pink-500/15 text-pink-400 border-pink-500/30",  editBtn: "border-pink-700/40 bg-pink-950/30 text-pink-300 hover:bg-pink-900/40" },
+                            linkedin:  { label: "LinkedIn",  icon: "💼", headerBg: "bg-teal-500/8 border-teal-500/20",  badge: "bg-teal-500/15 text-teal-400 border-teal-500/30",  editBtn: "border-teal-700/40 bg-teal-950/30 text-teal-300 hover:bg-teal-900/40" },
+                            x:         { label: "X (Twitter)",icon: "🐦", headerBg: "bg-slate-700/15 border-slate-600/30", badge: "bg-slate-700/30 text-slate-300 border-slate-600/40", editBtn: "border-slate-600/40 bg-slate-800/30 text-slate-300 hover:bg-slate-700/40" },
+                        };
+                        const meta = PLAT_META[currentPlatformId] || PLAT_META.facebook;
+                        const filteredAds = getFilteredSavedAds();
+                        return (
+                            <div className="space-y-6">
+                                {/* Library header */}
+                                <div className={`flex items-center justify-between px-5 py-3.5 rounded-2xl border ${meta.headerBg}`}>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-2xl">{meta.icon}</span>
+                                        <div>
+                                            <h2 className="text-sm font-bold text-white">{meta.label} ბიბლიოთეკა</h2>
+                                            <p className="text-[10px] text-slate-500 mt-0.5">შენახული პოსტები · {activeProject?.name || "—"}</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {filteredAds.length > 0 && (
+                                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-black border ${meta.badge}`}>
+                                                {filteredAds.length} პოსტი
+                                            </span>
+                                        )}
+                                        <button
+                                            onClick={() => { setPlatform(currentPlatformId); setActiveTab("generator"); }}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10"
+                                        >
+                                            🚀 ახალი პოსტი
+                                        </button>
+                                    </div>
                                 </div>
-                            ) : getFilteredSavedAds().length === 0 ? (
-                                <div className="glass-panel rounded-2xl p-12 text-center text-slate-500 flex flex-col items-center gap-3">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor" className="w-12 h-12 text-slate-700">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z" />
-                                    </svg>
-                                    <p className="text-sm font-semibold">ამ პლატფორმაზე ({activeTab.replace("saved-", "").toUpperCase()}) ჯერ არ გაქვთ შენახული პოსტები</p>
-                                    <button 
-                                        onClick={() => setActiveTab("generator")}
-                                        className="mt-2 text-xs font-bold text-indigo-400 hover:text-indigo-300 transition-colors"
-                                    >
-                                        დაუბრუნდით გენერატორს და შექმენით პირველი პოსტი
-                                    </button>
-                                </div>
-                            ) : (
-                                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 animate-fade-in">
-                                    {getFilteredSavedAds().map((ad) => (
-                                        <div key={ad.id} className="glass-panel rounded-2xl p-4 flex flex-col justify-between space-y-4">
-                                            <div className="space-y-3">
-                                                <div className="flex justify-between items-center">
-                                                    <span className="text-[9px] uppercase font-black px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/10">
-                                                        {ad.platform} · {ad.tone}
-                                                    </span>
-                                                    <button 
-                                                        onClick={() => deleteSavedAd(activeProject.id, ad.id)}
-                                                        className="text-slate-500 hover:text-rose-400 transition-colors text-xs"
-                                                    >
-                                                        წაშლა
-                                                    </button>
-                                                </div>
-                                                
-                                                {/* Display saved ad image if available */}
+
+                                {!activeProject ? (
+                                    <div className="glass-panel rounded-2xl p-12 text-center text-slate-500 max-w-md mx-auto">
+                                        <p className="text-sm font-semibold mb-2">საქმიანობის პროფილი არ არსებობს</p>
+                                        <button onClick={openCreateModal} className="text-xs font-bold text-indigo-400 hover:underline">
+                                            შექმენით საქმიანობა და დაიწყეთ
+                                        </button>
+                                    </div>
+                                ) : filteredAds.length === 0 ? (
+                                    <div className="glass-panel rounded-2xl p-12 text-center text-slate-500 flex flex-col items-center gap-4">
+                                        <div className="w-16 h-16 rounded-2xl border border-slate-800 bg-slate-900/50 flex items-center justify-center text-3xl">
+                                            {meta.icon}
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold text-slate-400">{meta.label}-ის პოსტები ჯერ არ არის</p>
+                                            <p className="text-xs text-slate-600 mt-1">შექმენით პირველი პოსტი გენერატორის გამოყენებით</p>
+                                        </div>
+                                        <button
+                                            onClick={() => { setPlatform(currentPlatformId); setActiveTab("generator"); }}
+                                            className="mt-1 px-5 py-2.5 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-600/10"
+                                        >
+                                            🚀 პოსტის შექმნა
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 animate-fade-in">
+                                        {filteredAds.map((ad) => (
+                                            <div
+                                                key={ad.id}
+                                                className="group relative glass-panel rounded-2xl overflow-hidden flex flex-col transition-all duration-300 hover:shadow-2xl hover:shadow-black/30 hover:-translate-y-0.5"
+                                            >
+                                                {/* Card image */}
                                                 {ad.image_url && (
-                                                    <img 
-                                                        src={ad.image_url} 
-                                                        alt="Saved Ad" 
-                                                        className="w-full h-32 object-cover rounded-xl border border-slate-800" 
-                                                    />
+                                                    <div className="relative h-36 bg-slate-900 overflow-hidden shrink-0">
+                                                        <img
+                                                            src={ad.image_url}
+                                                            alt="Post Image"
+                                                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                                                        />
+                                                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
+                                                    </div>
                                                 )}
 
-                                                <h3 className="font-bold text-sm text-white line-clamp-1">{ad.headline || "Saved Ad"}</h3>
-                                                <p className="text-xs text-slate-300 line-clamp-4 leading-relaxed whitespace-pre-line">{ad.text}</p>
-                                                {ad.cta && (
-                                                    <p className="text-[10px] text-indigo-400 font-bold">CTA: {ad.cta}</p>
-                                                )}
+                                                {/* Card body */}
+                                                <div className="p-4 flex flex-col flex-1 space-y-3">
+                                                    {/* Platform + Tone badge */}
+                                                    <div className="flex items-center justify-between">
+                                                        <span className={`text-[9px] uppercase font-black px-2 py-0.5 rounded-full border ${meta.badge}`}>
+                                                            {meta.icon} {meta.label} · {ad.tone}
+                                                        </span>
+                                                        {/* Delete button */}
+                                                        <button
+                                                            onClick={() => activeProject && deleteSavedAd(activeProject.id, ad.id)}
+                                                            className="opacity-0 group-hover:opacity-100 text-slate-600 hover:text-rose-400 transition-all text-xs p-1 rounded-lg hover:bg-rose-950/30"
+                                                            title="წაშლა"
+                                                        >
+                                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+
+                                                    {/* Headline */}
+                                                    <h3 className="font-bold text-sm text-white leading-snug line-clamp-1">
+                                                        {ad.headline || "პოსტი"}
+                                                    </h3>
+
+                                                    {/* Post text — clipped, expands on hover via overlay */}
+                                                    <p className="text-xs text-slate-400 line-clamp-3 leading-relaxed whitespace-pre-line flex-1">
+                                                        {ad.text}
+                                                    </p>
+
+                                                    {ad.cta && (
+                                                        <p className="text-[10px] text-indigo-400 font-bold border-l-2 border-indigo-500/40 pl-2">
+                                                            CTA: {ad.cta}
+                                                        </p>
+                                                    )}
+
+                                                    {/* Actions */}
+                                                    <div className="flex gap-2 pt-1">
+                                                        <button
+                                                            onClick={() => handleLoadAdToGenerator(ad)}
+                                                            className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[11px] font-bold rounded-xl border transition-all ${meta.editBtn}`}
+                                                        >
+                                                            ✏️ რედაქტირება
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText(`${ad.text}\n\n${ad.cta}`);
+                                                                showNotification("success", "ტექსტი წარმატებით კოპირდა!");
+                                                            }}
+                                                            className="flex-1 flex items-center justify-center gap-1.5 py-2 text-[11px] font-bold rounded-xl border border-slate-700/50 bg-slate-900/50 text-slate-300 hover:bg-slate-800/60 transition-all"
+                                                        >
+                                                            📋 კოპირება
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {/* ── FULL POST HOVER OVERLAY ── */}
+                                                <div className="absolute inset-0 rounded-2xl bg-slate-950/97 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-all duration-300 flex flex-col p-5 overflow-y-auto pointer-events-none group-hover:pointer-events-auto">
+                                                    {/* Overlay header */}
+                                                    <div className="flex items-center justify-between mb-3 shrink-0">
+                                                        <span className={`text-[9px] uppercase font-black px-2 py-0.5 rounded-full border ${meta.badge}`}>
+                                                            {meta.icon} {meta.label} · {ad.tone}
+                                                        </span>
+                                                        <span className="text-[9px] text-slate-600 font-semibold">სრული ტექსტი</span>
+                                                    </div>
+
+                                                    {/* Full headline */}
+                                                    {ad.headline && (
+                                                        <h3 className="text-sm font-bold text-white mb-2 leading-snug shrink-0">
+                                                            {ad.headline}
+                                                        </h3>
+                                                    )}
+
+                                                    {/* Full post text */}
+                                                    <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-line flex-1">
+                                                        {ad.text}
+                                                    </p>
+
+                                                    {ad.cta && (
+                                                        <p className="text-[10px] text-indigo-400 font-bold mt-2 border-l-2 border-indigo-500/40 pl-2 shrink-0">
+                                                            CTA: {ad.cta}
+                                                        </p>
+                                                    )}
+
+                                                    {/* Overlay actions */}
+                                                    <div className="flex gap-2 mt-4 shrink-0">
+                                                        <button
+                                                            onClick={() => handleLoadAdToGenerator(ad)}
+                                                            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-xl border transition-all ${meta.editBtn}`}
+                                                        >
+                                                            ✏️ რედაქტირება
+                                                        </button>
+                                                        <button
+                                                            onClick={() => {
+                                                                navigator.clipboard.writeText(`${ad.text}\n\n${ad.cta}`);
+                                                                showNotification("success", "ტექსტი წარმატებით კოპირდა!");
+                                                            }}
+                                                            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-xl border border-slate-700/50 bg-slate-900/50 text-slate-300 hover:bg-slate-800/60 transition-all"
+                                                        >
+                                                            📋 კოპირება
+                                                        </button>
+                                                        <button
+                                                            onClick={() => activeProject && deleteSavedAd(activeProject.id, ad.id)}
+                                                            className="p-2.5 text-slate-600 hover:text-rose-400 transition-all rounded-xl border border-slate-800 hover:bg-rose-950/30 hover:border-rose-900/50"
+                                                            title="წაშლა"
+                                                        >
+                                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3.5 h-3.5">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+                                                            </svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <button
-                                                onClick={() => {
-                                                    navigator.clipboard.writeText(`${ad.text}\n\n${ad.cta}`);
-                                                    showNotification("success", "ტექსტი წარმატებით კოპირდა!");
-                                                }}
-                                                className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-colors"
-                                            >
-                                                📋 ტექსტის კოპირება
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })()}
                 </div>
             </main>
 
